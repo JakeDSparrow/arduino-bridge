@@ -4,6 +4,9 @@ const fetch = require('node-fetch');
 const app = express();
 app.use(express.json());
 
+// Force trust proxy so Railway doesn't redirect
+app.set('trust proxy', false);
+
 const RAILWAY_URL = 'https://smartfarmingsystemforstringbeans-web-production.up.railway.app';
 
 app.post('/api/sensor-reading', async (req, res) => {
