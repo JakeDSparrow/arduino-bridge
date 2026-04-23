@@ -1,58 +1,68 @@
 const express = require("express");
 const fetch = require("node-fetch");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 app.use(express.json());
-
 app.set("trust proxy", false);
 
 const PORT = process.env.PORT || 3000;
 const RAILWAY_URL =
   "https://smartfarmingsystemforstringbeans-web-production.up.railway.app";
 
-/**
- * In-memory irrigation state store.
- * Keyed by system_id so multiple farms/systems can work.
- */
-const irrigationStateBySystemId = new Map();
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-/**
- * Normalize incoming payload and enforce types.
- */
-function normalizeIrrigationState(payload = {}) {
-  const systemId = Number(payload.system_id);
-  if (!Number.isFinite(systemId) || systemId <= 0) {
-    throw new Error("Invalid system_id");
-  }
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+}
 
-  const autoModeEnabled = Boolean(payload.auto_mode_enabled);
-  const pumpStatus = Boolean(payload.pump_status);
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-  return {
-    system_id: systemId,
-    auto_mode_enabled: autoModeEnabled,
-    pump_status: pumpStatus,
-    updated_at: new Date().toISOString(),
-  };
+function toSystemId(raw) {
+  const id = Number(raw);
+  if (!Number.isFinite(id) || id <= 0) throw new Error("Invalid system_id");
+  return id;
 }
 
 /**
- * POST from mobile app (dashboard/waterDistribution):
- * Save latest auto/manual + pump state for Arduino polling.
+ * Mobile app writes control state here (auto/manual + pump).
  */
-app.post("/api/irrigation-state", (req, res) => {
+app.post("/api/irrigation-state", async (req, res) => {
   try {
-    const normalized = normalizeIrrigationState(req.body);
-    irrigationStateBySystemId.set(normalized.system_id, normalized);
+    const systemId = toSystemId(req.body?.system_id);
+    const autoModeEnabled = Boolean(req.body?.auto_mode_enabled);
+    const pumpStatus = Boolean(req.body?.pump_status);
 
-    console.log("✅ Irrigation state updated:", normalized);
+    const { data, error } = await supabase
+      .from("irrigation_system")
+      .update({
+        auto_mode_enabled: autoModeEnabled,
+        pump_status: pumpStatus,
+        controller_online: true,
+        last_seen_at: new Date().toISOString(),
+      })
+      .eq("id", systemId)
+      .select("id, auto_mode_enabled, pump_status, last_seen_at, controller_online")
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data) {
+      return res.status(404).json({
+        ok: false,
+        error: `irrigation_system id=${systemId} not found`,
+      });
+    }
+
     return res.status(200).json({
-      ok: true,
-      message: "Irrigation state saved",
-      state: normalized,
+      system_id: data.id,
+      auto_mode_enabled: Boolean(data.auto_mode_enabled),
+      pump_status: Boolean(data.pump_status),
+      controller_online: Boolean(data.controller_online),
+      last_seen_at: data.last_seen_at ?? null,
     });
   } catch (err) {
-    console.error("❌ Invalid irrigation-state payload:", req.body, err.message);
+    console.error("POST /api/irrigation-state error:", err);
     return res.status(400).json({
       ok: false,
       error: err.message || "Invalid irrigation-state payload",
@@ -61,33 +71,49 @@ app.post("/api/irrigation-state", (req, res) => {
 });
 
 /**
- * GET from Arduino every 2s:
- * Returns latest state for this system_id.
+ * Arduino polls this every 2 seconds.
  */
-app.get("/api/irrigation-state", (req, res) => {
-  const systemId = Number(req.query.system_id);
+app.get("/api/irrigation-state", async (req, res) => {
+  try {
+    const systemId = toSystemId(req.query?.system_id);
 
-  if (!Number.isFinite(systemId) || systemId <= 0) {
+    const { data, error } = await supabase
+      .from("irrigation_system")
+      .select("id, auto_mode_enabled, pump_status, last_seen_at, controller_online")
+      .eq("id", systemId)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (!data) {
+      // keep predictable shape for Arduino parser
+      return res.status(200).json({
+        system_id: systemId,
+        auto_mode_enabled: false,
+        pump_status: false,
+        controller_online: false,
+        last_seen_at: null,
+      });
+    }
+
+    return res.status(200).json({
+      system_id: data.id,
+      auto_mode_enabled: Boolean(data.auto_mode_enabled),
+      pump_status: Boolean(data.pump_status),
+      controller_online: Boolean(data.controller_online),
+      last_seen_at: data.last_seen_at ?? null,
+    });
+  } catch (err) {
+    console.error("GET /api/irrigation-state error:", err);
     return res.status(400).json({
       ok: false,
-      error: "system_id query param is required and must be a number",
+      error: err.message || "Invalid system_id",
     });
   }
-
-  const state =
-    irrigationStateBySystemId.get(systemId) || {
-      system_id: systemId,
-      auto_mode_enabled: false,
-      pump_status: false,
-      updated_at: null,
-    };
-
-  return res.status(200).json(state);
 });
 
 /**
- * POST from Arduino sensor readings:
- * Forward to your main Railway backend.
+ * Arduino sensor reporting passthrough.
  */
 app.post("/api/sensor-reading", async (req, res) => {
   try {
@@ -107,7 +133,6 @@ app.post("/api/sensor-reading", async (req, res) => {
       data = { raw: text };
     }
 
-    console.log("✅ Forwarded to Railway:", data);
     return res.status(response.status).json(data);
   } catch (e) {
     console.error("❌ Bridge error:", e);
@@ -115,12 +140,6 @@ app.post("/api/sensor-reading", async (req, res) => {
   }
 });
 
-app.get("/health", (_req, res) =>
-  res.json({
-    status: "OK",
-    bridge: "running",
-    tracked_systems: irrigationStateBySystemId.size,
-  })
-);
+app.get("/health", (_req, res) => res.json({ status: "OK" }));
 
 app.listen(PORT, () => console.log(`Bridge running on port ${PORT}`));
