@@ -74,6 +74,8 @@ app.post("/api/irrigation-state", async (req, res) => {
  * Arduino polls this every 2 seconds.
  */
 app.get("/api/irrigation-state", async (req, res) => {
+  console.log("🔍 Arduino GET query:", req.query); // ADD THIS
+  console.log("🔍 Raw system_id:", req.query?.system_id); // ADD THIS
   try {
     const systemId = toSystemId(req.query?.system_id);
 
