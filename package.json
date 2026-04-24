@@ -2,12 +2,6 @@
   "name": "arduino-bridge",
   "version": "1.0.0",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "@supabase/supabase-js": "^2.104.1",
-    "express": "^4.22.1",
-    "node-fetch": "^2.7.0"
-  }
+  "scripts": { "start": "node index.js" },
+  "dependencies": { "express": "^4.18.2", "node-fetch": "^2.7.0" }
 }
